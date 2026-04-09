@@ -50,6 +50,7 @@ class PolarManager:
             "timestamp": None,
             "HR": None,
             "HRV": None,
+            "RR_ms": None,
             "event_marker": self._event_marker,
             "condition": self._condition
         }
@@ -168,6 +169,7 @@ class PolarManager:
                     ('timestamp', h5py.string_dtype(encoding='utf-8')),
                     ('HR', 'f4'),
                     ('HRV', 'f4'),
+                    ('RR_ms', 'f4'),
                     ('event_marker', h5py.string_dtype(encoding='utf-8')),
                     ('condition', h5py.string_dtype(encoding='utf-8')),
                 ])
@@ -226,28 +228,41 @@ class PolarManager:
             
             if has_rr and len(data) >= offset + 2:
                 num_rr = (len(data) - offset) // 2
+                rr_values_ms = []
                 for i in range(num_rr):
                     rr_value = struct.unpack('<H', data[offset + i*2:offset + (i+1)*2])[0]
                     rr_ms = (rr_value / 1024.0) * 1000.0
+                    rr_values_ms.append(rr_ms)
                     self._rr_intervals.append(rr_ms)
-            
-            hrv_value = self.calculate_hrv_rmssd()
-            
-            self._current_row["experiment_name"] = self._experiment_name
-            self._current_row["trial_name"] = self._trial_name
-            self._current_row["subject_id"] = self._subject_id
-            self._current_row["experimenter_name"] = self._experimenter_name
-            self._current_row["timestamp_unix"] = tsu
-            self._current_row["timestamp"] = ts
-            self._current_row["HR"] = self._last_hr
-            self._current_row["HRV"] = hrv_value
-            self._current_row["event_marker"] = self.event_marker
-            self._current_row["condition"] = self.condition
-            
-            if self._streaming:
-                self.write_to_hdf5(self._current_row)
-                hrv_display = f"{hrv_value:.1f}" if hrv_value is not None else "N/A"
-                print(f"✓ HR={self._last_hr} HRV={hrv_display}")
+
+                hrv_value = self.calculate_hrv_rmssd()
+
+                if self._streaming:
+                    # Reconstruct per-beat timestamps by walking backwards from
+                    # the BLE packet arrival time (tsu). The most recent beat
+                    # occurred closest to tsu; earlier beats are offset further back.
+                    cumulative_offset_ms = sum(rr_values_ms)
+                    for rr_ms in rr_values_ms:
+                        cumulative_offset_ms -= rr_ms
+                        beat_tsu = tsu - (cumulative_offset_ms / 1000.0)
+                        beat_ts  = datetime.fromtimestamp(beat_tsu).isoformat()
+                        row = {
+                            "experiment_name":   self._experiment_name,
+                            "trial_name":        self._trial_name,
+                            "subject_id":        self._subject_id,
+                            "experimenter_name": self._experimenter_name,
+                            "timestamp_unix":    beat_tsu,
+                            "timestamp":         beat_ts,
+                            "HR":                self._last_hr,
+                            "HRV":               hrv_value,
+                            "RR_ms":             rr_ms,
+                            "event_marker":      self.event_marker,
+                            "condition":         self.condition,
+                        }
+                        self.write_to_hdf5(row)
+
+                    hrv_display = f"{hrv_value:.1f}" if hrv_value is not None else "N/A"
+                    print(f"✓ HR={self._last_hr} HRV={hrv_display} RR_count={len(rr_values_ms)}")
                 
         except Exception as e:
             print(f"Error parsing heart rate data: {e}")
@@ -404,8 +419,9 @@ class PolarManager:
             "timestamp": None,
             "HR": None,
             "HRV": None,
-            "event_marker": self._event_marker, 
-            "condition": self._condition      
+            "RR_ms": None,
+            "event_marker": self._event_marker,
+            "condition": self._condition
         }
         self._streaming = False
         self._running = False
@@ -438,6 +454,7 @@ class PolarManager:
             new_data[0]['timestamp'] = row.get('timestamp', '')  
             new_data[0]['HR'] = row.get('HR', np.nan)
             new_data[0]['HRV'] = row.get('HRV', np.nan)
+            new_data[0]['RR_ms'] = row.get('RR_ms', np.nan)
             new_data[0]['event_marker'] = row.get('event_marker', '')
             new_data[0]['condition'] = row.get('condition', '')
 
